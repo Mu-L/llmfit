@@ -94,10 +94,6 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
-        Self::with_specs(SystemSpecs::detect())
-    }
-
     pub fn with_specs(specs: SystemSpecs) -> Self {
         let db = ModelDatabase::new();
 

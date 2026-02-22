@@ -1019,11 +1019,3 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(Paragraph::new(status_line), area);
 }
-
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max_len - 1])
-    }
-}
