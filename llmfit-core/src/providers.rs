@@ -150,7 +150,6 @@ impl ModelProvider for OllamaProvider {
                 Ok(resp) => {
                     let reader = std::io::BufReader::new(resp.into_reader());
                     use std::io::BufRead;
-                    let mut saw_success = false;
                     for line in reader.lines() {
                         let Ok(line) = line else { break };
                         if line.is_empty() {
@@ -171,19 +170,16 @@ impl ModelProvider for OllamaProvider {
                                 percent,
                             });
                             if parsed.status == "success" {
-                                saw_success = true;
                                 let _ = tx.send(PullEvent::Done);
                                 return;
                             }
                         }
                     }
                     // Stream ended without "success" — treat as error
-                    if !saw_success {
-                        let _ = tx.send(PullEvent::Error(
-                            "Pull ended without success (model may not exist in Ollama registry)"
-                                .to_string(),
-                        ));
-                    }
+                    let _ = tx.send(PullEvent::Error(
+                        "Pull ended without success (model may not exist in Ollama registry)"
+                            .to_string(),
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(PullEvent::Error(format!("{e}")));
