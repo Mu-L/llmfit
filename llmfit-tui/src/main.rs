@@ -1304,12 +1304,17 @@ fn run_download(
                     }
                     Ok(llmfit_core::providers::PullEvent::Done) => {
                         println!("\n\n✓ Download complete!");
-                        let dest = provider.models_dir().join(&filename);
+                        // Use basename for the local path (subdirectory files are saved flat)
+                        let local_name = std::path::Path::new(&filename)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&filename);
+                        let dest = provider.models_dir().join(local_name);
                         println!("  Saved to: {}", dest.display());
                         if provider.llama_cli_path().is_some() {
                             println!(
                                 "\n  Run with: llmfit run {}",
-                                filename.trim_end_matches(".gguf")
+                                local_name.trim_end_matches(".gguf")
                             );
                             println!("  Or directly: llama-cli -m {} -cnv", dest.display());
                         } else {

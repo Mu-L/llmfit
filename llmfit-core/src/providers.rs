@@ -632,7 +632,10 @@ impl LlamaCppProvider {
     /// List GGUF files available in a HuggingFace repository.
     /// Returns a list of (filename, size_bytes) tuples.
     pub fn list_repo_gguf_files(repo_id: &str) -> Vec<(String, u64)> {
-        let url = format!("https://huggingface.co/api/models/{}/tree/main", repo_id);
+        let url = format!(
+            "https://huggingface.co/api/models/{}/tree/main?recursive=true",
+            repo_id
+        );
         let Ok(resp) = ureq::get(&url)
             .config()
             .timeout_global(Some(std::time::Duration::from_secs(15)))
@@ -686,15 +689,21 @@ impl LlamaCppProvider {
     /// `repo_id` is e.g. "bartowski/Llama-3.1-8B-Instruct-GGUF"
     /// `filename` is e.g. "Llama-3.1-8B-Instruct-Q4_K_M.gguf"
     pub fn download_gguf(&self, repo_id: &str, filename: &str) -> Result<PullHandle, String> {
-        // Sanitize filename to prevent path traversal (security: issue #127)
-        validate_gguf_filename(filename)?;
+        // Validate the repo path (may include subdirectories like "Q4_K_M/model.gguf")
+        validate_gguf_repo_path(filename)?;
 
         let models_dir = self.models_dir.clone();
         let url = format!(
             "https://huggingface.co/{}/resolve/main/{}",
             repo_id, filename
         );
-        let dest_path = models_dir.join(filename);
+        // Save locally using just the basename to keep cache directory flat
+        let local_filename = std::path::Path::new(filename)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("Invalid filename in path: {}", filename))?;
+        validate_gguf_filename(local_filename)?;
+        let dest_path = models_dir.join(local_filename);
 
         // Final safety check: ensure resolved path stays within models_dir
         if let (Ok(canonical_dir), Ok(canonical_dest)) = (
@@ -885,12 +894,53 @@ fn is_split_file(filename: &str) -> bool {
     filename.contains("-of-")
 }
 
+/// Validate a GGUF path returned from the HuggingFace API.
+/// Unlike `validate_gguf_filename`, this allows subdirectory paths (e.g.
+/// `Q4_K_M/model.gguf`) but still rejects path traversal and non-GGUF files.
+fn validate_gguf_repo_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("GGUF path must not be empty".to_string());
+    }
+
+    // Reject path-traversal components
+    for component in path.split('/') {
+        if component == ".." || component == "." {
+            return Err(format!(
+                "Security: path traversal not allowed in GGUF path: {}",
+                path
+            ));
+        }
+    }
+
+    // Reject backslashes (Windows-style paths)
+    if path.contains('\\') {
+        return Err(format!(
+            "Security: backslash not allowed in GGUF path: {}",
+            path
+        ));
+    }
+
+    // Reject absolute paths
+    if path.starts_with('/') {
+        return Err(format!(
+            "Security: absolute paths not allowed in GGUF path: {}",
+            path
+        ));
+    }
+
+    if !path.ends_with(".gguf") {
+        return Err(format!("GGUF path must end in .gguf, got: {}", path));
+    }
+
+    Ok(())
+}
+
 fn parse_repo_gguf_entries(entries: Vec<serde_json::Value>) -> Vec<(String, u64)> {
     entries
         .into_iter()
         .filter_map(|e| {
             let path = e.get("path")?.as_str()?.to_string();
-            if validate_gguf_filename(&path).is_err() {
+            if validate_gguf_repo_path(&path).is_err() {
                 return None;
             }
             let size = e.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -2555,6 +2605,45 @@ mod tests {
         assert!(validate_gguf_filename("C:\\models\\model.gguf").is_err());
     }
 
+    // ── validate_gguf_repo_path ────────────────────────────────────
+
+    #[test]
+    fn test_validate_gguf_repo_path_valid() {
+        assert!(validate_gguf_repo_path("model.gguf").is_ok());
+        assert!(validate_gguf_repo_path("Q4_K_M/model.gguf").is_ok());
+        assert!(validate_gguf_repo_path("deep/nested/model.gguf").is_ok());
+    }
+
+    #[test]
+    fn test_validate_gguf_repo_path_rejects_traversal() {
+        assert!(validate_gguf_repo_path("../escape.gguf").is_err());
+        assert!(validate_gguf_repo_path("foo/../bar.gguf").is_err());
+        assert!(validate_gguf_repo_path("./model.gguf").is_err());
+    }
+
+    #[test]
+    fn test_validate_gguf_repo_path_rejects_absolute() {
+        assert!(validate_gguf_repo_path("/etc/passwd").is_err());
+        assert!(validate_gguf_repo_path("/tmp/model.gguf").is_err());
+    }
+
+    #[test]
+    fn test_validate_gguf_repo_path_rejects_backslash() {
+        assert!(validate_gguf_repo_path("dir\\model.gguf").is_err());
+        assert!(validate_gguf_repo_path("C:\\models\\model.gguf").is_err());
+    }
+
+    #[test]
+    fn test_validate_gguf_repo_path_rejects_non_gguf() {
+        assert!(validate_gguf_repo_path("malware.exe").is_err());
+        assert!(validate_gguf_repo_path("subdir/readme.md").is_err());
+    }
+
+    #[test]
+    fn test_validate_gguf_repo_path_rejects_empty() {
+        assert!(validate_gguf_repo_path("").is_err());
+    }
+
     #[test]
     fn test_parse_repo_gguf_entries_filters_unsafe_paths() {
         let entries = vec![
@@ -2566,7 +2655,13 @@ mod tests {
         ];
 
         let files = parse_repo_gguf_entries(entries);
-        assert_eq!(files, vec![("good.gguf".to_string(), 123u64)]);
+        assert_eq!(
+            files,
+            vec![
+                ("good.gguf".to_string(), 123u64),
+                ("nested/model.gguf".to_string(), 789u64),
+            ]
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────
