@@ -99,6 +99,33 @@ impl OllamaProvider {
         format!("{}/api/{}", self.base_url.trim_end_matches('/'), path)
     }
 
+    /// Delete a model from Ollama via its API.
+    pub fn delete_model(&self, model_tag: &str) -> Result<(), String> {
+        // Ollama DELETE /api/delete requires a JSON body.
+        // ureq v3's delete() doesn't support request bodies, so we build a
+        // raw http::Request and pass it to the agent's `run()` method.
+        let body = serde_json::json!({ "name": model_tag }).to_string();
+        let url = self.api_url("delete");
+        let request = http::Request::builder()
+            .method("DELETE")
+            .uri(&url)
+            .header("content-type", "application/json")
+            .body(body)
+            .map_err(|e| format!("Failed to build request: {}", e))?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build()
+            .into();
+        let resp = agent
+            .run(request)
+            .map_err(|e| format!("Ollama delete request failed: {}", e))?;
+        if resp.status() == 200 {
+            Ok(())
+        } else {
+            Err(format!("Ollama returned status {}", resp.status()))
+        }
+    }
+
     /// Single-pass startup probe to avoid duplicate `/api/tags` calls.
     /// Returns `(available, installed_models)`.
     pub fn detect_with_installed(&self) -> (bool, HashSet<String>, usize) {
@@ -582,6 +609,25 @@ impl LlamaCppProvider {
     /// Return the directory where GGUF models are cached.
     pub fn models_dir(&self) -> &std::path::Path {
         &self.models_dir
+    }
+
+    /// Override the models directory at runtime.
+    pub fn set_models_dir(&mut self, dir: PathBuf) {
+        self.models_dir = dir;
+    }
+
+    /// Delete a GGUF model file by tag (file stem match).
+    pub fn delete_model(&self, model_tag: &str) -> Result<(), String> {
+        let tag_lower = model_tag.to_lowercase();
+        for path in self.list_gguf_files() {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.to_lowercase() == tag_lower {
+                    return std::fs::remove_file(&path)
+                        .map_err(|e| format!("Failed to delete {}: {}", path.display(), e));
+                }
+            }
+        }
+        Err(format!("Model file not found for '{}'", model_tag))
     }
 
     /// Path to `llama-cli` if detected.
@@ -1135,7 +1181,7 @@ fn parse_repo_gguf_entries(entries: Vec<serde_json::Value>) -> Vec<(String, u64)
 }
 
 /// Default directory for llama.cpp GGUF model cache.
-fn llamacpp_models_dir() -> PathBuf {
+pub fn llamacpp_models_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("LLMFIT_MODELS_DIR") {
         PathBuf::from(dir)
     } else if let Ok(home) = std::env::var("HOME") {
